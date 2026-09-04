@@ -1,0 +1,259 @@
+--- pulchra.c.upstream	(PULCHRA 3.06 as distributed)
++++ pulchra.c	(pulchra-wasm)
+@@ -32,6 +32,7 @@
+ #define real double
+ 
+ #include "pulchra_common.h"
++#include "fast_tables.h" /* PULCHRA-WASM fast tables */
+ 
+ #define PULCHRA_VERSION 3.06
+ #define MAX_BUF_SIZE 1000
+@@ -343,6 +344,7 @@
+   int gx, gy, gz;
+   struct _res_type *res;
+   struct _atom_type *prev;
++  int gslot; /* PULCHRA-WASM fast grid: 1-based slot in cell slab, 0 = none */
+ } atom_type;
+ 
+ typedef struct _res_type {
+@@ -1400,6 +1402,8 @@
+     out = fopen(tname, "a");
+     if (out) {
+       fprintf(out, "END\n");
++      fclose(out); /* upstream leaks this handle; harmless in a one-shot
++                      process, but not when the process is long-lived */
+     }
+   }
+ 
+@@ -1835,6 +1839,8 @@
+   return NULL;
+ }
+ 
++static inline void fast_grid_update(atom_type *a); /* PULCHRA-WASM fast grid */
++
+ void add_replace(res_type *res, char *aname, real x, real y, real z,
+                  int flags) {
+   atom_type *atom, *newatom;
+@@ -1849,6 +1855,7 @@
+         atom->z = z;
+       }
+       atom->flag |= flags;
++      fast_grid_update(atom); /* PULCHRA-WASM fast grid: keep slab in sync */
+       break;
+     }
+     atom = atom->next;
+@@ -2009,6 +2016,16 @@
+       RBINS[i][1] = bin13_2;
+       RBINS[i][2] = bin14;
+     }
++
++    /* scratch arrays; upstream leaks them (about 0.9 kB per structure) */
++    for (i = 0; i < 8; i++) {
++      free(cacoords[i]);
++      free(tmpcoords[i]);
++      free(tmpstat[i]);
++    }
++    free(cacoords);
++    free(tmpcoords);
++    free(tmpstat);
+   }
+ }
+ 
+@@ -2092,19 +2109,7 @@
+     pro = 0;
+ 
+     if (prevres && !strncmp(prevres->name, "PRO", 3)) {
+-      j = 0;
+-      besthit = 1000.;
+-      bestpos = 0;
+-      do {
+-        hit = abs(nco_stat_pro[j].bins[0] - bin13_1) +
+-              abs(nco_stat_pro[j].bins[1] - bin13_2) +
+-              0.2 * abs(nco_stat_pro[j].bins[2] - bin14);
+-        if (hit < besthit) {
+-          besthit = hit;
+-          bestpos = j;
+-        }
+-        j++;
+-      } while (nco_stat_pro[j].bins[0] >= 0 && hit > 1e-3);
++      bestpos = nco_stat_pro_find(bin13_1, bin13_2, bin14); /* PULCHRA-WASM fast tables */
+       for (j = 0; j < 4; j++) {
+         for (k = 0; k < 3; k++) {
+           tmpstat[j][k] = nco_stat_pro[bestpos].data[j][k];
+@@ -2116,19 +2121,7 @@
+         }
+       }
+     } else {
+-      j = 0;
+-      besthit = 1000.;
+-      bestpos = 0;
+-      do {
+-        hit = abs(nco_stat[j].bins[0] - bin13_1) +
+-              abs(nco_stat[j].bins[1] - bin13_2) +
+-              0.2 * abs(nco_stat[j].bins[2] - bin14);
+-        if (hit < besthit) {
+-          besthit = hit;
+-          bestpos = j;
+-        }
+-        j++;
+-      } while (nco_stat[j].bins[0] >= 0 && hit > 1e-3);
++      bestpos = nco_stat_find(bin13_1, bin13_2, bin14); /* PULCHRA-WASM fast tables */
+       for (j = 0; j < 4; j++) {
+         for (k = 0; k < 3; k++) {
+           tmpstat[j][k] = nco_stat[bestpos].data[j][k];
+@@ -2172,6 +2165,16 @@
+   if (_VERBOSE)
+     printf("Backbone rebuilding deviation: average = %.3f, max = %.3f\n",
+            total / (real)chain_length, maxrms);
++
++  /* scratch arrays; upstream leaks them (about 0.9 kB per structure) */
++  for (i = 0; i < 8; i++) {
++    free(cacoords[i]);
++    free(tmpcoords[i]);
++    free(tmpstat[i]);
++  }
++  free(cacoords);
++  free(tmpcoords);
++  free(tmpstat);
+ }
+ 
+ #endif
+@@ -2405,34 +2408,14 @@
+ 
+     // gather 10 closest rotamer conformations...
+ 
+-    for (j = 0; j < 10; j++)
+-      SORTED_ROTAMERS[i][j][0] = 500.;
+-
+-    j = 0;
+-    besthit = 1000.;
+-    bestpos = 0;
+-    do {
+-      if (rot_stat_idx[j][0] == res->type) {
+-        hit = abs(rot_stat_idx[j][1] - bin13_1) +
+-              abs(rot_stat_idx[j][2] - bin13_2) +
+-              0.2 * abs(rot_stat_idx[j][3] - bin14);
+-        if (hit < SORTED_ROTAMERS[i][9][0]) {
+-          k = 9;
+-          while (k >= 0 && hit < SORTED_ROTAMERS[i][k][0]) {
+-            k--;
+-          }
+-          k++;
+-          // k = hit
+-          for (l = 9; l > k; l--) {
+-            SORTED_ROTAMERS[i][l][0] = SORTED_ROTAMERS[i][l - 1][0];
+-            SORTED_ROTAMERS[i][l][1] = SORTED_ROTAMERS[i][l - 1][1];
+-          }
+-          SORTED_ROTAMERS[i][k][0] = hit;
+-          SORTED_ROTAMERS[i][k][1] = j;
+-        }
++    { /* PULCHRA-WASM fast tables: memoised, type-restricted rotamer search */
++      real rhit[10]; int rpos[10];
++      rot_sorted_lookup(res->type, bin13_1, bin13_2, bin14, rhit, rpos);
++      for (j = 0; j < 10; j++) {
++        SORTED_ROTAMERS[i][j][0] = rhit[j];
++        SORTED_ROTAMERS[i][j][1] = rpos[j];
+       }
+-      j++;
+-    } while (rot_stat_idx[j][0] >= 0);
++    }
+ 
+     besthit = SORTED_ROTAMERS[i][0][0];
+     bestpos = SORTED_ROTAMERS[i][0][1];
+@@ -2550,10 +2533,12 @@
+   struct _atom_list *next;
+ } atom_list;
+ 
++#include "fast_grid.h" /* PULCHRA-WASM fast grid */
++
+ // finds steric conflicts
+ 
+-int get_conflicts(res_type *res, atom_list ****grid, int xgrid, int ygrid,
+-                  int zgrid) {
++int get_conflicts_orig(res_type *res, atom_list ****grid, int xgrid, int ygrid,
++                       int zgrid) {
+   atom_list *llist;
+   atom_type *atom, *atom2;
+   int i, j, k, x, y, z;
+@@ -2635,6 +2620,29 @@
+   }
+ 
+   return con;
++}
++
++/* PULCHRA-WASM fast grid: dispatcher (see fast_grid.h) */
++int get_conflicts(res_type *res, atom_list ****grid, int xgrid, int ygrid,
++                  int zgrid) {
++#if defined(PULCHRA_ORIG_GRID)
++  return get_conflicts_orig(res, grid, xgrid, ygrid, zgrid);
++#elif defined(PULCHRA_GRID_SELFCHECK)
++  {
++    int a = get_conflicts_orig(res, grid, xgrid, ygrid, zgrid);
++    int b = fg_ready ? get_conflicts_fast(res, xgrid, ygrid, zgrid) : a;
++    if (a != b) {
++      fprintf(stderr, "FAST GRID MISMATCH: %s[%d] orig=%d fast=%d\n", res->name,
++              res->num, a, b);
++      abort();
++    }
++    return a;
++  }
++#else
++  if (!fg_ready)
++    return get_conflicts_orig(res, grid, xgrid, ygrid, zgrid);
++  return get_conflicts_fast(res, xgrid, ygrid, zgrid);
++#endif
+ }
+ 
+ int display_conflicts(res_type *res, atom_list ****grid, int xgrid, int ygrid,
+@@ -2724,10 +2732,19 @@
+   return con;
+ }
+ 
++/* Clash-detection grid, cached between optimize_backbone() and
++   optimize_exvol() within one reconstruction.  Hoisted out of allocate_grid()
++   (where it used to be a function-local static) so that pulchra_reset() in
++   wasm_entry.c can free it between runs of a long-lived process. */
++int GRID_X = 0, GRID_Y = 0, GRID_Z = 0;
++atom_list ****GRID = NULL;
++
+ void allocate_grid(atom_list *****grid_, int *xgrid_, int *ygrid_,
+                    int *zgrid_) {
+-  static int xgrid, ygrid, zgrid;
+-  static atom_list ****grid = NULL;
++#define xgrid GRID_X
++#define ygrid GRID_Y
++#define zgrid GRID_Z
++#define grid GRID
+   atom_list *llist, *alist;
+   real min[3], max[3];
+   res_type *res, *worst;
+@@ -2798,6 +2815,7 @@
+       }
+       res = res->next;
+     }
++    fast_grid_build(grid, xgrid, ygrid, zgrid); /* PULCHRA-WASM fast grid */
+   } else {
+     if (_VERBOSE)
+       printf("Grid already allocated (%d %d %d)\n", xgrid, ygrid, zgrid);
+@@ -2807,6 +2825,10 @@
+   *xgrid_ = xgrid;
+   *ygrid_ = ygrid;
+   *zgrid_ = zgrid;
++#undef xgrid
++#undef ygrid
++#undef zgrid
++#undef grid
+ }
+ 
+ void optimize_exvol(void) {
+@@ -3475,7 +3497,9 @@
+   int i, j, next;
+   char buf[100];
+   char *name = NULL, *ini_name = NULL;
+-  char *ptr, out_name[1000];
++  char *ptr, out_name[1000] = ""; /* upstream leaves this uninitialised; it is
++                                     printed in verbose mode even when
++                                     ca_optimize() never filled it */
+   real f;
+   mol_type *mol;
+   struct timeb time0, time1;

@@ -1,0 +1,61 @@
+{
+  "name": "@revanta/pulchrasm",
+  "version": "0.1.0",
+  "description": "WASM port of the PowerfUL CHain Restoration Algorithm (PULCHRA)",
+  "license": "MIT",
+  "type": "commonjs",
+  "main": "./index.cjs",
+  "exports": {
+    ".": {
+      "node": {
+        "import": "./index.node.mjs",
+        "require": "./index.cjs"
+      },
+      "default": "./index.browser.mjs"
+    },
+    "./worker": "./lib/worker.mjs",
+    "./core": "./lib/core.mjs",
+    "./wasm": "./dist/pulchra.wasm",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist/",
+    "lib/",
+    "bin/",
+    "index.cjs",
+    "index.node.mjs",
+    "index.browser.mjs",
+    "LICENSE",
+    "native/LICENSE"
+  ],
+  "scripts": {
+    "build": "./build.sh",
+    "bench": "./benchmark/scn-test/reproduce.sh",
+    "test": "node test/persistent.test.js && node test/cli.test.js",
+    "pack-tables": "cc -O1 -o /tmp/pulchra_pack_tables native/tools/pack_tables.c && /tmp/pulchra_pack_tables > native/packed_tables.h && cc -O1 -o /tmp/pulchra_verify_tables native/tools/verify_tables.c native/pulchra_data.c && /tmp/pulchra_verify_tables"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "pulchra",
+    "protein",
+    "backmapping",
+    "reconstruction",
+    "structural-biology",
+    "wasm",
+    "webassembly",
+    "pdb",
+    "wasi"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Revanta-Inc/pulchrasm.git"
+  },
+  "bin": {
+    "pulchrasm": "bin/pulchrasm.mjs"
+  },
+  "engines": {
+    "node": ">=20.19"
+  }
+}

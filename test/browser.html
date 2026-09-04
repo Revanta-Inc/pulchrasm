@@ -1,0 +1,52 @@
+<!doctype html>
+<!-- Manual browser test for the Web Worker loader.  Serve the package root
+     (e.g. `python3 -m http.server 8765`) and open /test/browser.html.
+     Rebuilds one SCN-test structure in a worker and compares it with the
+     stored PULCHRA output. -->
+<meta charset="utf-8">
+<title>pulchrasm worker test</title>
+<pre id="log">loading…</pre>
+<script type="module">
+  import { createPulchraWorker, createPulchra, PulchraError } from '../index.browser.mjs';
+  const log = (s) => { document.getElementById('log').textContent += '\n' + s; };
+  const name = 'FM%23T0859_1.pdb';
+  window.result = (async () => {
+    const stored = await (await fetch(`../pulchra-scn-test-reproduction/outputs/wasm-pulchra/${name}`)).text();
+    const ca = stored.split('\n').filter((l) => /^ATOM.{8} CA /.test(l)).join('\n') + '\n';
+
+    const t0 = performance.now();
+    const w = await createPulchraWorker();
+    const tLoad = performance.now() - t0;
+    log(`worker ready in ${tLoad.toFixed(0)} ms, PULCHRA ${await w.version()}`);
+
+    const t1 = performance.now();
+    const r = await w.run(ca);
+    const tRun = performance.now() - t1;
+    const identical = r.pdb === stored;
+    log(`worker run: ${tRun.toFixed(1)} ms, identical to stored: ${identical}, stdout: ${JSON.stringify(r.stdout)}`);
+
+    // overlapping calls + error propagation through the worker
+    const many = await Promise.all([ca, ca, ca].map((s) => w.run(s)));
+    const allSame = many.every((x) => x.pdb === stored);
+    let errOk = false;
+    try { await w.run(ca, { args: ['-Q'] }); } catch (e) { errOk = e instanceof PulchraError && /Unknown option/.test(e.message) && e.exitCode === -1; }
+    const ex = await w.exec(['pulchra'], {});
+    const usageOk = ex.exitCode === -1 && /Usage: pulchra/.test(ex.stdout);
+    log(`3 overlapping runs identical: ${allSame}; PulchraError propagated: ${errOk}; exec usage: ${usageOk}`);
+
+    // second worker sharing one compiled module + main-thread engine
+    const mod = await WebAssembly.compile(await (await fetch('../dist/pulchra.wasm')).arrayBuffer());
+    const w2 = await createPulchraWorker({ wasmModule: mod });
+    const r2 = await w2.run(ca);
+    const main = await createPulchra({ wasmModule: mod });
+    const r3 = await main.run(ca);
+    log(`shared-module worker identical: ${r2.pdb === stored}; main-thread engine identical: ${r3.pdb === stored}`);
+    w.terminate(); w2.terminate();
+    let termOk = false;
+    try { await w.run(ca); } catch (e) { termOk = /terminated/.test(e.message); }
+    log(`terminate() rejects further calls: ${termOk}`);
+    const ok = identical && allSame && errOk && usageOk && r2.pdb === stored && r3.pdb === stored && termOk;
+    log(ok ? 'ALL BROWSER TESTS PASSED' : 'FAILED');
+    return { ok, tLoad, tRun, stdout: r.stdout };
+  })().catch((e) => { log('ERROR ' + (e.stack || e)); return { ok: false, error: String(e) }; });
+</script>
